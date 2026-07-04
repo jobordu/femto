@@ -1,0 +1,19 @@
+# femto-sbx-full — the one-image-has-everything fallback. Union of the crypto + pwn
+# toolchains, used for untagged / multi-category / mis-tagged challenges where a
+# specialized sandbox might be missing a needed tool (network-off = can't install at
+# runtime). Biggest image; the price of never getting stuck on a wrong tag.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        binutils xxd file netcat-openbsd coreutils \
+        grep gawk sed jq curl \
+        gdb gcc libc6-dev ltrace strace binwalk foremost \
+        openssl ca-certificates \
+        tar gzip bzip2 xz-utils unzip \
+    && rm -rf /var/lib/apt/lists/*
+ARG WITH_SYMPY=0
+RUN pip install --no-cache-dir pycryptodome requests gmpy2 pwntools ropgadget capstone \
+    && if [ "$WITH_SYMPY" = "1" ]; then pip install --no-cache-dir sympy; fi \
+    && find /usr/local/lib/python3.12 -name '__pycache__' -type d -prune -exec rm -rf {} + \
+    && rm -rf /root/.cache
+WORKDIR /task
+CMD ["sleep", "3600"]

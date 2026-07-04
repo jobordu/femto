@@ -1,0 +1,19 @@
+# femto-sbx-lite — the tiny tier for web / misc / shell challenges that need NO
+# Python: just shell + light binary/network tools on alpine. ~30-60MB (vs ~350MB for
+# the python-based full image). The agent's tool-calls run here network-OFF, so every
+# tool is baked in (can't apt/apk-install at runtime).
+FROM alpine:3.20
+RUN apk add --no-cache \
+        bash \
+        coreutils \
+        curl \
+        netcat-openbsd \
+        file \
+        xxd \
+        binutils \
+        grep gawk sed \
+        jq \
+        openssl \
+        tar gzip xz unzip
+WORKDIR /task
+CMD ["sleep", "3600"]

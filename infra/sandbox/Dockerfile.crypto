@@ -1,0 +1,14 @@
+# femto-sbx-crypto — the Python tier for crypto / ppc challenges. python-slim +
+# crypto/number-theory libs. ~180MB. sympy (RSA/discrete-log math, heavy) is opt-in:
+# `--build-arg WITH_SYMPY=1`.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        binutils xxd file openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ARG WITH_SYMPY=0
+RUN pip install --no-cache-dir pycryptodome requests gmpy2 \
+    && if [ "$WITH_SYMPY" = "1" ]; then pip install --no-cache-dir sympy; fi \
+    && find /usr/local/lib/python3.12 -name '__pycache__' -type d -prune -exec rm -rf {} + \
+    && rm -rf /root/.cache
+WORKDIR /task
+CMD ["sleep", "3600"]
