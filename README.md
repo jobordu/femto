@@ -30,13 +30,28 @@ femto -base-url http://localhost:8000/v1 -model my-model -prompt "..."   # vLLM 
 
 ## Why Go
 femto is JSON-over-HTTPS + a parser + a tool dispatcher. Go gives a ~3 MB static binary,
-ms startup, a TLS stack that never surprises you, and trivial cross-compilation. **Zero
-third-party deps** (stdlib only) — instant builds, nil supply chain.
+millisecond startup, a TLS stack that never surprises you, and trivial cross-compilation.
+**Zero third-party deps** (stdlib only) — instant builds, nil supply chain.
 
-| | image | cold start | deps |
+| | image (pull) | binary start | deps |
 |---|---|---|---|
-| a typical python agent | ~150 MB | ~150 ms | interpreter + libs |
-| **femto** | **~3 MB scratch** | **~2 ms** | **none** |
+| a comparable python agent | ~150 MB | ~110 ms | interpreter + libs |
+| **femto** | **~3 MB scratch** | **~5 ms** | **none** |
+
+### Startup (measured)
+Process start, macOS/arm64, median of 150 runs (`fork`+`exec` floor ≈ 1.6 ms):
+
+| process | median | note |
+|---|---|---|
+| **femto** `-version` | **4.7 ms** | Go runtime init + flag parse |
+| python interpreter (`-c pass`) | 20 ms | bare, no imports |
+| python agent (import http client + modules) | **108 ms** | the real per-invocation floor |
+| `docker run` sandbox (lite) | **~430 ms** | container cold start |
+| `docker run` sandbox (crypto) | **~760 ms** | container cold start |
+
+Takeaway: femto's own start (~5 ms) is negligible — in a fleet the cold start is the
+**sandbox** (~430–760 ms), ~100× heavier than the agent. So latency work belongs on the
+sandbox side (a warm pool, or microVM snapshot-restore), not the agent.
 
 ## The two containers
 femto (the **brain**) and the **sandbox** (the **hands**) are separate images. femto
