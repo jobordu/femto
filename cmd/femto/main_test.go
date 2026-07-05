@@ -256,3 +256,21 @@ func TestFirstEnv(t *testing.T) {
 		t.Fatalf("firstEnv empty failed: %q", got)
 	}
 }
+
+func TestRunParseMode(t *testing.T) {
+	// -parse re-executes the ReAct parser deterministically (no LLM/key) — the
+	// verification primitive the neutrality judge uses to confirm/refute HARNESS claims.
+	var out, errb bytes.Buffer
+	code := run([]string{"-parse", "-prompt", "Let's try. ACTION: shell INPUT: ls"},
+		env(nil), &out, &errb)
+	if code != 0 || !strings.Contains(out.String(), `"Kind":"tool"`) ||
+		!strings.Contains(out.String(), `"Tool":"shell"`) {
+		t.Fatalf("parse tool: code=%d out=%q", code, out.String())
+	}
+	out.Reset()
+	// prose with no directive -> "none": a HARNESS claim on this text would be refuted.
+	run([]string{"-parse", "-prompt", "I think the flag is here."}, env(nil), &out, &errb)
+	if !strings.Contains(out.String(), `"Kind":"none"`) {
+		t.Fatalf("parse none: %q", out.String())
+	}
+}

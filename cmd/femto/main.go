@@ -67,6 +67,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		taskID    = fs.String("task-id", "", "task id stamped on the trace record")
 		benchmark = fs.String("benchmark", "", "benchmark name stamped on the trace record")
 		showVer   = fs.Bool("version", false, "print version and exit")
+		parseOnly = fs.Bool("parse", false, "parse -prompt through the ReAct parser and print the Action as JSON, then exit — deterministic verification for the harness-neutrality judge")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -78,6 +79,11 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if *prompt == "" {
 		fmt.Fprintln(stderr, "femto: -prompt is required")
 		return 2
+	}
+	if *parseOnly { // deterministic parser re-execution — no LLM, no key needed.
+		b, _ := json.Marshal(agent.ParseAction(*prompt))
+		fmt.Fprintln(stdout, string(b))
+		return 0
 	}
 	key := firstEnv(getenv, "FEMTO_API_KEY", "OPENAI_API_KEY")
 	if key == "" {
