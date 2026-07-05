@@ -1,6 +1,9 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseActionFinalWins(t *testing.T) {
 	a := ParseAction("thinking...\nFINAL: flag{abc}")
@@ -136,5 +139,90 @@ func TestParseActionAnchoredStillPreferred(t *testing.T) {
 	a := ParseAction("I considered an action: earlier.\nACTION: shell\nINPUT: ls")
 	if a.Kind != "tool" || a.Tool != "shell" || a.Input != "ls" {
 		t.Fatalf("anchored directive not preferred: %+v", a)
+	}
+}
+
+func TestParseActionFinalViaActionFrame(t *testing.T) {
+	// Models that finalize through the ACTION frame (real trace: mixtral-8x7b emitted
+	// "ACTION: FINAL\nINPUT: CTF{...}"). FINAL is a directive, not a tool.
+	cases := map[string]string{
+		"ACTION: FINAL\nINPUT:\nCTF{flag}":            "CTF{flag}",
+		"ACTION: FINAL: CTF{flag}":                     "CTF{flag}",
+		"ACTION: FINAL CTF{flag}":                      "CTF{flag}",
+		"ACTION: FINAL\nCTF{flag}":                     "CTF{flag}",
+		"prose\n\nACTION: FINAL\nINPUT:\nthe answer":   "the answer",
+		"TOOL: final: done":                            "done",
+	}
+	for in, want := range cases {
+		a := ParseAction(in)
+		if a.Kind != "final" || a.Final != want {
+			t.Errorf("action-final %q -> %+v, want final %q", in, a, want)
+		}
+	}
+}
+
+func TestParseActionFinalPrecedence(t *testing.T) {
+	// A real tool that appears BEFORE an action-final wins (first directive wins).
+	a := ParseAction("ACTION: shell\nINPUT: ls\nACTION: FINAL: done")
+	if a.Kind != "tool" || a.Tool != "shell" {
+		t.Errorf("tool-before-final: %+v", a)
+	}
+	// A line-anchored FINAL earlier than an action-tool still wins (final kind).
+	a = ParseAction("FINAL: x\nACTION: shell\nINPUT: ls")
+	if a.Kind != "final" || !strings.HasPrefix(a.Final, "x") {
+		t.Errorf("anchored-final-first: %+v", a)
+	}
+	// action-final answer on following lines is bounded by the next directive.
+	a = ParseAction("ACTION: FINAL\nthe answer\nACTION: shell\nINPUT: ls")
+	if a.Kind != "final" || a.Final != "the answer" {
+		t.Errorf("action-final bounded by next directive: %+v", a)
+	}
+}
+
+func TestParseActionInlineWithNextLineInput(t *testing.T) {
+	// Class B (real traces: minimax-m3, llama-3.2-3b): the ACTION is glued mid-prose
+	// with INPUT on the FOLLOWING line. Recovered because INPUT: is on the next line.
+	a := ParseAction("I'll analyze step by step.ACTION: shell\nINPUT:\nls -la /task/")
+	if a.Kind != "tool" || a.Tool != "shell" || a.Input != "ls -la /task/" {
+		t.Fatalf("inline+next-line-input: %+v", a)
+	}
+	// guard: prose that mentions ACTION: with NO nearby INPUT stays none.
+	if ParseAction("I will use the ACTION: format later.").Kind != "none" {
+		t.Error("prose ACTION false-positive")
+	}
+}
+
+func TestParseToolCallWrapper(t *testing.T) {
+	// Class A (real traces: minimax-m2.7): the model's own "<...tool_call>" wrapper.
+	cases := []struct{ in, tool, input string }{
+		{"x\n\n<minimax:tool_call>\nshell\nINPUT:\ncat f", "shell", "cat f"},
+		{"<minimax:tool_call>: python\nINPUT:\nprint(1)", "python", "print(1)"},
+		{"<tool_call>\nshell\nINPUT: id", "shell", "id"},
+		{"<TOOLCALL: shell\nINPUT: ls /task", "shell", "ls /task"},
+	}
+	for _, c := range cases {
+		a := ParseAction(c.in)
+		if a.Kind != "tool" || a.Tool != c.tool || a.Input != c.input {
+			t.Errorf("tool_call %q -> %+v want tool=%q input=%q", c.in, a, c.tool, c.input)
+		}
+	}
+	// mixed "<tool_call> ACTION: shell" is handled by the ACTION path, not the wrapper.
+	a := ParseAction("<minimax:tool_call> ACTION: shell\nINPUT: ls")
+	if a.Kind != "tool" || a.Tool != "shell" {
+		t.Errorf("mixed wrapper+action: %+v", a)
+	}
+	// a wrapper with no resolvable tool name -> none (no next-line tool).
+	if ParseAction("<tool_call>\n\nsome prose here").Kind != "none" {
+		t.Error("wrapper with no tool should be none")
+	}
+	// a bare wrapper with nothing after it at all -> none.
+	if ParseAction("<minimax:tool_call>").Kind != "none" {
+		t.Error("bare wrapper should be none")
+	}
+	// a wrapper whose inline text is an ACTION keyword is skipped (deferred to the ACTION
+	// path); a later clean wrapper still wins.
+	a = ParseAction("<tool_call> ACTION\n<tool_call>\nshell\nINPUT: id")
+	if a.Kind != "tool" || a.Tool != "shell" {
+		t.Errorf("skip-action-wrapper: %+v", a)
 	}
 }

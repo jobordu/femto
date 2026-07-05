@@ -29,6 +29,14 @@ var (
 	// the directive after a sentence). Gated on a following INPUT: marker so a stray
 	// prose keyword can't hijack the parse.
 	inlineActionRE = regexp.MustCompile(`(?i)\b(?:ACTION|TOOL)\**[ \t]*:[ \t]*([^\n]*)`)
+	// actionFinalRE catches a model that finalizes through the action frame —
+	// "ACTION: FINAL", "ACTION: FINAL: <ans>", "TOOL: final <ans>" — which is a FINAL
+	// directive, not a tool call. The capture is whatever follows FINAL on the line.
+	actionFinalRE = regexp.MustCompile(`(?im)^[ \t>*#\-]*(?:ACTION|TOOL)\**[ \t]*:[ \t]*FINAL\b[ \t:]*([^\n]*)`)
+	// toolCallRE catches a model's own native-ish tool-call wrapper emitted in TEXT mode
+	// — e.g. minimax's "<minimax:tool_call>\nshell\nINPUT: …" or "<tool_call>: python".
+	// The tool name is inline after the marker or on the next line; INPUT follows.
+	toolCallRE = regexp.MustCompile(`(?im)^[ \t]*<[a-z0-9_.:\- ]*tool[_ ]?call[>:][ \t>]*:?[ \t]*([^\n]*)`)
 	finalRE        = regexp.MustCompile(`(?ims)^[ \t]*[>*#\-]*[ \t]*FINAL\**[ \t]*:[ \t]*(.+)`)
 	inputRE  = regexp.MustCompile(`(?ims)^[ \t]*[>*#\-]*[ \t]*INPUT\**[ \t]*:[ \t]*\n?(.*)`)
 	inlineRE = regexp.MustCompile(`(?i)\bINPUT\b[ \t]*:`)
@@ -97,9 +105,89 @@ func cleanToolName(raw string) string {
 // ParseAction parses one ReAct step. Whichever of FINAL/ACTION appears first wins.
 // INPUT is the text after an INPUT: marker, or — if omitted — everything after the
 // ACTION line. Code fences and surrounding markdown are stripped.
+// findActionFinal extracts a FINAL answer expressed through the action frame
+// ("ACTION: FINAL …"). Returns the match position, the answer (inline after FINAL, else
+// an INPUT: value, else the rest up to the next directive), and whether one was found.
+func findActionFinal(t string) (int, string, bool) {
+	m := actionFinalRE.FindStringSubmatchIndex(t)
+	if m == nil {
+		return 0, "", false
+	}
+	if inline := strings.TrimSpace(t[m[2]:m[3]]); inline != "" {
+		return m[0], stripFences(inline), true // "ACTION: FINAL: <ans>" / "… FINAL <ans>"
+	}
+	stop := len(t) // answer is on a following INPUT: line or the rest of the message
+	for _, rx := range []*regexp.Regexp{actionRE, finalRE, actionFinalRE} {
+		if nxt := rx.FindStringIndex(t[m[1]:]); nxt != nil {
+			if s := m[1] + nxt[0]; s < stop {
+				stop = s
+			}
+		}
+	}
+	seg := t[m[1]:stop]
+	if mi := inputRE.FindStringSubmatch(seg); mi != nil {
+		return m[0], stripInput(mi[1]), true
+	}
+	return m[0], stripInput(seg), true
+}
+
+// inputNear reports whether an INPUT: marker sits on the inline action's own line or the
+// next non-empty line — the disambiguator that lets a mid-prose directive with INPUT on
+// the following line parse, without a bare prose "ACTION:" hijacking it.
+func inputNear(t string, m []int) bool {
+	if inlineRE.MatchString(t[m[2]:m[3]]) { // same line
+		return true
+	}
+	rest := strings.TrimLeft(t[m[1]:], "\n") // next non-empty line
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	return inlineRE.MatchString(rest)
+}
+
+// firstLine returns the first non-empty line of s (leading blank lines skipped).
+func firstLine(s string) string {
+	s = strings.TrimLeft(s, "\n \t")
+	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+		return s[:nl]
+	}
+	return s
+}
+
+// findToolCall recovers a model's own tool-call wrapper (e.g. "<minimax:tool_call>")
+// emitted in text mode. Returns the match indices + tool name, or nil. Mixed cases that
+// ALSO contain an ACTION: are left to the ACTION path (which runs first).
+func findToolCall(t string) ([]int, string) {
+	for _, m := range toolCallRE.FindAllStringSubmatchIndex(t, -1) {
+		inline := strings.TrimSpace(t[m[2]:m[3]])
+		if strings.Contains(strings.ToUpper(inline), "ACTION") {
+			continue // "<tool_call> ACTION: shell" — the inline-ACTION path handles it
+		}
+		name := cleanToolName(inlineRE.Split(inline, 2)[0])
+		if name == "" { // tool is on the next non-empty line — must be a lone token, not
+			nxt := strings.TrimSpace(firstLine(t[m[1]:])) // a prose sentence
+			if nxt != "" && !strings.ContainsAny(nxt, " \t") {
+				name = cleanToolName(nxt)
+			}
+		}
+		if name != "" {
+			return m, name
+		}
+	}
+	return nil, ""
+}
+
 func ParseAction(text string) Action {
 	t := text
-	mf := finalRE.FindStringIndex(t)
+	// FINAL can arrive line-anchored ("FINAL: x") OR through the action frame
+	// ("ACTION: FINAL\nINPUT: x" — some models finalize this way). Take the earliest.
+	finalPos, finalAns, hasFinal := -1, "", false
+	if mf := finalRE.FindStringIndex(t); mf != nil {
+		finalPos, finalAns, hasFinal = mf[0], stripFences(finalRE.FindStringSubmatch(t)[1]), true
+	}
+	if p, ans, ok := findActionFinal(t); ok && (!hasFinal || p < finalPos) {
+		finalPos, finalAns, hasFinal = p, ans, true
+	}
 
 	// First ACTION line that actually names a tool. A bare "ACTION:" (no name) is
 	// skipped rather than scraping the next line as the tool.
@@ -108,9 +196,10 @@ func ParseAction(text string) Action {
 	scan := func(re *regexp.Regexp, requireInput bool) bool {
 		for _, m := range re.FindAllStringSubmatchIndex(t, -1) {
 			group1 := t[m[2]:m[3]]
-			// Gate the non-anchored fallback on a following INPUT: marker so a stray
-			// "ACTION:" mentioned in prose can't hijack the parse.
-			if requireInput && !inlineRE.MatchString(group1) {
+			// Gate the non-anchored fallback on a nearby INPUT: marker (same line OR the
+			// next line) so a stray "ACTION:" mentioned in prose can't hijack the parse,
+			// while "…prose. ACTION: shell\nINPUT: ls" (INPUT on the next line) still parses.
+			if requireInput && !inputNear(t, m) {
 				continue
 			}
 			// Tool name comes from the text BEFORE any inline "INPUT:" on the action
@@ -124,14 +213,16 @@ func ParseAction(text string) Action {
 		}
 		return false
 	}
-	// Prefer a directive on its own line; only if none is found, recover an inline
-	// "…prose. ACTION: <tool> INPUT: <cmd>" (disambiguated by the INPUT marker).
-	if !scan(actionRE, false) {
-		scan(inlineActionRE, true)
+	// Prefer a directive on its own line; then an inline "…prose. ACTION: <tool>
+	// INPUT: <cmd>"; then a model's own "<...tool_call>" wrapper.
+	if !scan(actionRE, false) && !scan(inlineActionRE, true) {
+		if m, name := findToolCall(t); m != nil {
+			ma, tool = m, name
+		}
 	}
 
-	if mf != nil && (ma == nil || mf[0] <= ma[0]) {
-		return Action{Kind: "final", Final: stripFences(finalRE.FindStringSubmatch(t)[1])}
+	if hasFinal && (ma == nil || finalPos <= ma[0]) {
+		return Action{Kind: "final", Final: finalAns}
 	}
 	if ma != nil {
 		// Bound this action's input to BEFORE the next directive: a chatty model may
