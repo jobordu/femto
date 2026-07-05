@@ -105,3 +105,36 @@ func TestNativeToolInput(t *testing.T) {
 		}
 	}
 }
+
+func TestParseActionInlineAfterProse(t *testing.T) {
+	// The real trace fault: capable models write the directive after a sentence.
+	// Recovered only because an INPUT: marker disambiguates it from prose.
+	a := ParseAction(`It seems there is a syntax error. Let's try to fix it. ACTION: python INPUT: print("hi")`)
+	if a.Kind != "tool" || a.Tool != "python" || a.Input != `print("hi")` {
+		t.Fatalf("inline-after-prose not recovered: %+v", a)
+	}
+	a = ParseAction(`hexdump not available. Let's use od instead. ACTION: shell INPUT: od -c /task/f`)
+	if a.Kind != "tool" || a.Tool != "shell" || a.Input != "od -c /task/f" {
+		t.Fatalf("inline shell not recovered: %+v", a)
+	}
+}
+
+func TestParseActionInlineProseNoInputStaysNone(t *testing.T) {
+	// A prose mention of ACTION: with no INPUT marker must NOT hijack the parse.
+	for _, s := range []string{
+		"I will use the ACTION: format to solve this problem next.",
+		"The correct action: think carefully before answering.",
+	} {
+		if a := ParseAction(s); a.Kind != "none" {
+			t.Errorf("prose false-positive on %q: %+v", s, a)
+		}
+	}
+}
+
+func TestParseActionAnchoredStillPreferred(t *testing.T) {
+	// A proper line-anchored directive wins even if prose earlier mentions ACTION.
+	a := ParseAction("I considered an action: earlier.\nACTION: shell\nINPUT: ls")
+	if a.Kind != "tool" || a.Tool != "shell" || a.Input != "ls" {
+		t.Fatalf("anchored directive not preferred: %+v", a)
+	}
+}

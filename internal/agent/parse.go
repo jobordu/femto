@@ -24,7 +24,12 @@ type Action struct {
 // can't scrape the NEXT line as the tool.
 var (
 	actionRE = regexp.MustCompile(`(?im)^[ \t]*[>*#\-]*[ \t]*(?:ACTION|TOOL)\**[ \t]*:[ \t]*([^\n]*)`)
-	finalRE  = regexp.MustCompile(`(?ims)^[ \t]*[>*#\-]*[ \t]*FINAL\**[ \t]*:[ \t]*(.+)`)
+	// inlineActionRE is the same but NOT line-anchored — used only as a fallback for a
+	// mid-line "…prose. ACTION: <tool> INPUT: <cmd>" (capable models routinely write
+	// the directive after a sentence). Gated on a following INPUT: marker so a stray
+	// prose keyword can't hijack the parse.
+	inlineActionRE = regexp.MustCompile(`(?i)\b(?:ACTION|TOOL)\**[ \t]*:[ \t]*([^\n]*)`)
+	finalRE        = regexp.MustCompile(`(?ims)^[ \t]*[>*#\-]*[ \t]*FINAL\**[ \t]*:[ \t]*(.+)`)
 	inputRE  = regexp.MustCompile(`(?ims)^[ \t]*[>*#\-]*[ \t]*INPUT\**[ \t]*:[ \t]*\n?(.*)`)
 	inlineRE = regexp.MustCompile(`(?i)\bINPUT\b[ \t]*:`)
 	fenceRE  = regexp.MustCompile("(?s)^```[a-zA-Z0-9_+-]*\n?")
@@ -100,16 +105,29 @@ func ParseAction(text string) Action {
 	// skipped rather than scraping the next line as the tool.
 	var ma []int
 	var tool string
-	for _, m := range actionRE.FindAllStringSubmatchIndex(t, -1) {
-		group1 := t[m[2]:m[3]]
-		// Tool name comes from the text BEFORE any inline "INPUT:" on the action
-		// line — so "ACTION: shell INPUT: cmd" names 'shell', and "ACTION:/INPUT:"
-		// names nothing rather than scraping the INPUT marker.
-		before := inlineRE.Split(group1, 2)[0]
-		if name := cleanToolName(before); name != "" {
-			ma, tool = m, name
-			break
+	scan := func(re *regexp.Regexp, requireInput bool) bool {
+		for _, m := range re.FindAllStringSubmatchIndex(t, -1) {
+			group1 := t[m[2]:m[3]]
+			// Gate the non-anchored fallback on a following INPUT: marker so a stray
+			// "ACTION:" mentioned in prose can't hijack the parse.
+			if requireInput && !inlineRE.MatchString(group1) {
+				continue
+			}
+			// Tool name comes from the text BEFORE any inline "INPUT:" on the action
+			// line — so "ACTION: shell INPUT: cmd" names 'shell', and "ACTION:/INPUT:"
+			// names nothing rather than scraping the INPUT marker.
+			before := inlineRE.Split(group1, 2)[0]
+			if name := cleanToolName(before); name != "" {
+				ma, tool = m, name
+				return true
+			}
 		}
+		return false
+	}
+	// Prefer a directive on its own line; only if none is found, recover an inline
+	// "…prose. ACTION: <tool> INPUT: <cmd>" (disambiguated by the INPUT marker).
+	if !scan(actionRE, false) {
+		scan(inlineActionRE, true)
 	}
 
 	if mf != nil && (ma == nil || mf[0] <= ma[0]) {
