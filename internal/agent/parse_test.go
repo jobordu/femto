@@ -226,3 +226,42 @@ func TestParseToolCallWrapper(t *testing.T) {
 		t.Errorf("skip-action-wrapper: %+v", a)
 	}
 }
+
+func TestParseActionInlineCommandNoInput(t *testing.T) {
+	// Issue 1 (real trace: mistral-small): "ACTION: <tool> <cmd>" with the command inline
+	// after the tool and NO INPUT: marker — the command must not be dropped.
+	cases := []struct{ in, tool, input string }{
+		{"ACTION: shell ls -la /task", "shell", "ls -la /task"},
+		{`ACTION: python3 -c "print(1)"`, "python3", `-c "print(1)"`},
+		// mid-prose, no INPUT:, but the tool word is KNOWN -> recovered (issue 2).
+		{`Let me remove BOM. ACTION: python3 -c "data=1"`, "python3", `-c "data=1"`},
+	}
+	for _, c := range cases {
+		a := ParseAction(c.in)
+		if a.Kind != "tool" || a.Tool != c.tool || a.Input != c.input {
+			t.Errorf("%q -> %+v want tool=%q input=%q", c.in, a, c.tool, c.input)
+		}
+	}
+}
+
+func TestParseActionMidProseUnknownToolStaysNone(t *testing.T) {
+	// mid-prose ACTION: whose next word is NOT a known tool and has no INPUT: -> none.
+	for _, s := range []string{
+		"The next ACTION: carefully review the code before deciding.",
+		"My preferred action: think about the whole problem first.",
+	} {
+		if a := ParseAction(s); a.Kind != "none" {
+			t.Errorf("mid-prose unknown-tool false-positive on %q: %+v", s, a)
+		}
+	}
+}
+
+func TestAfterToolNotFound(t *testing.T) {
+	// defensive branch: a tool string absent from the action line yields no inline cmd.
+	if got := afterTool("shell ls", "python"); got != "" {
+		t.Errorf("afterTool not-found should be empty, got %q", got)
+	}
+	if got := afterTool("shell ls -la", "shell"); got != "ls -la" {
+		t.Errorf("afterTool got %q", got)
+	}
+}

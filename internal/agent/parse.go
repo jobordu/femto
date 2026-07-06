@@ -131,6 +131,28 @@ func findActionFinal(t string) (int, string, bool) {
 	return m[0], stripInput(seg), true
 }
 
+// knownToolHint disambiguates a mid-prose "ACTION: <tool> <cmd>" (no INPUT: marker) from
+// prose like "the next ACTION: carefully review" — only these exact tool words/aliases
+// let a non-anchored action through without an INPUT: marker. Mirrors LookupTool's set.
+var knownToolHint = map[string]bool{
+	"shell": true, "bash": true, "sh": true,
+	"python": true, "python3": true, "py": true,
+}
+
+// namesKnownTool reports whether the action line's tool slot is a known tool/alias.
+func namesKnownTool(group1 string) bool {
+	return knownToolHint[strings.ToLower(cleanToolName(inlineRE.Split(group1, 2)[0]))]
+}
+
+// afterTool returns the inline command that follows the tool name on the action line
+// (e.g. `-c "cmd"` in "ACTION: python3 -c \"cmd\""), or "" if none.
+func afterTool(group1, tool string) string {
+	if i := strings.Index(strings.ToLower(group1), strings.ToLower(tool)); i >= 0 {
+		return strings.TrimSpace(group1[i+len(tool):])
+	}
+	return ""
+}
+
 // inputNear reports whether an INPUT: marker sits on the inline action's own line or the
 // next non-empty line — the disambiguator that lets a mid-prose directive with INPUT on
 // the following line parse, without a bare prose "ACTION:" hijacking it.
@@ -199,7 +221,7 @@ func ParseAction(text string) Action {
 			// Gate the non-anchored fallback on a nearby INPUT: marker (same line OR the
 			// next line) so a stray "ACTION:" mentioned in prose can't hijack the parse,
 			// while "…prose. ACTION: shell\nINPUT: ls" (INPUT on the next line) still parses.
-			if requireInput && !inputNear(t, m) {
+			if requireInput && !inputNear(t, m) && !namesKnownTool(group1) {
 				continue
 			}
 			// Tool name comes from the text BEFORE any inline "INPUT:" on the action
@@ -249,10 +271,16 @@ func ParseAction(text string) Action {
 			}
 			return Action{Kind: "tool", Tool: tool, Input: stripFences(val)}
 		}
-		// Otherwise INPUT is on a following line (or absent → rest of the message).
+		// INPUT: on a following line takes precedence (covers "ACTION: shell\nINPUT: ls"
+		// and markdown "**INPUT:**\nwhoami").
 		seg := t[ma[1]:stop]
 		if mi := inputRE.FindStringSubmatch(seg); mi != nil {
 			return Action{Kind: "tool", Tool: tool, Input: stripInput(mi[1])}
+		}
+		// "ACTION: <tool> <cmd>" — the command is inline after the tool, no INPUT: marker
+		// (e.g. `ACTION: python3 -c "…"`). Without this the command was silently dropped.
+		if cmd := afterTool(group1, tool); cmd != "" {
+			return Action{Kind: "tool", Tool: tool, Input: stripFences(cmd)}
 		}
 		return Action{Kind: "tool", Tool: tool, Input: stripInput(seg)}
 	}
