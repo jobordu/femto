@@ -110,7 +110,7 @@ func TestRunDockerExecutorSeam(t *testing.T) {
 
 	var gotImage string
 	cleaned := false
-	newDockerExecutor = func(image, mount, mem string) (agent.Executor, func(), error) {
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
 		gotImage = image
 		return fakeExec{}, func() { cleaned = true }, nil
 	}
@@ -123,10 +123,33 @@ func TestRunDockerExecutorSeam(t *testing.T) {
 	}
 }
 
+func TestRunDockerNetworkFlag(t *testing.T) {
+	srv := finalServer(t)
+	defer srv.Close()
+	orig := newDockerExecutor
+	defer func() { newDockerExecutor = orig }()
+	var gotNet string
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
+		gotNet = network
+		return fakeExec{}, func() {}, nil
+	}
+	var out, errb bytes.Buffer
+	base := []string{"-prompt", "x", "-base-url", srv.URL + "/v1", "-executor", "docker"}
+	e := env(map[string]string{"FEMTO_API_KEY": "k"})
+	run(base, e, &out, &errb) // default: offline
+	if gotNet != "none" {
+		t.Fatalf("default network: want none, got %q", gotNet)
+	}
+	run(append(base, "-network", "cy-svc-net"), e, &out, &errb) // service challenge
+	if gotNet != "cy-svc-net" {
+		t.Fatalf("network flag not propagated: want cy-svc-net, got %q", gotNet)
+	}
+}
+
 func TestRunDockerExecutorError(t *testing.T) {
 	orig := newDockerExecutor
 	defer func() { newDockerExecutor = orig }()
-	newDockerExecutor = func(image, mount, mem string) (agent.Executor, func(), error) {
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
 		return nil, nil, errors.New("no daemon")
 	}
 	var out, errb bytes.Buffer
@@ -157,7 +180,7 @@ func TestRunDockerImageOverride(t *testing.T) {
 	orig := newDockerExecutor
 	defer func() { newDockerExecutor = orig }()
 	var gotImage string
-	newDockerExecutor = func(image, mount, mem string) (agent.Executor, func(), error) {
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
 		gotImage = image
 		return fakeExec{}, func() {}, nil
 	}
