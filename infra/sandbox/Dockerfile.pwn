@@ -11,6 +11,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
         binwalk \
         foremost \
         steghide libimage-exiftool-perl sleuthkit tshark pngcheck john \
+        unzip bsdextrautils tcpdump \
         openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Forensics tier was missing the tools NYU-CTF forensics actually needs (stego/memory/disk/pcap),
