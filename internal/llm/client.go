@@ -50,8 +50,11 @@ type Client struct {
 	Temperature float64
 	MaxTokens   int
 	Tools       []any // function-calling schemas; non-nil => native mode
-	http        *http.Client
-	maxRetries  int
+	// Stop is sent as the API "stop" list (text mode). If the provider rejects the
+	// parameter, Call drops it once and retries, like the temperature/system fix-ups.
+	Stop       []string
+	http       *http.Client
+	maxRetries int
 }
 
 // retryStatus: 429 = rate limit, 502/503/504 = transient gateway/overload. 500 is
@@ -93,13 +96,16 @@ const minPositiveTemp = 1e-6
 // masquerades as a model failure. Each fix-up applies at most once:
 //   - temperature 0 rejected ("must be > 0")  -> retry with minPositiveTemp
 //   - system role rejected (500)              -> fold system into the user turn
+//   - "stop" parameter rejected (400/422)     -> resend without stop sequences
+//
 // A model that needs BOTH (e.g. gemma at temp 0) chains through both.
 func (c *Client) Call(messages []Message) (Reply, error) {
 	temp := c.Temperature
 	msgs := messages
-	tempFixed, sysFixed := false, false
+	stop := c.Stop
+	tempFixed, sysFixed, stopFixed := false, false, false
 	for {
-		reply, status, body, err := c.send(msgs, temp)
+		reply, status, body, err := c.send(msgs, temp, stop)
 		if err == nil {
 			return reply, nil
 		}
@@ -107,6 +113,11 @@ func (c *Client) Call(messages []Message) (Reply, error) {
 		if !tempFixed && (status == 400 || status == 422) &&
 			strings.Contains(low, "temperature") && temp <= 0 {
 			temp, tempFixed = minPositiveTemp, true
+			continue
+		}
+		if !stopFixed && len(stop) > 0 && (status == 400 || status == 422) &&
+			strings.Contains(low, "stop") {
+			stop, stopFixed = nil, true // e.g. reasoning models: "Unsupported parameter: 'stop'"
 			continue
 		}
 		if !sysFixed && status == http.StatusInternalServerError &&
@@ -120,12 +131,15 @@ func (c *Client) Call(messages []Message) (Reply, error) {
 
 // send does one POST + parse at the given temperature, returning the HTTP status
 // and raw body so Call can react to provider-specific rejections.
-func (c *Client) send(messages []Message, temperature float64) (Reply, int, string, error) {
+func (c *Client) send(messages []Message, temperature float64, stop []string) (Reply, int, string, error) {
 	body := map[string]any{
 		"model":       c.Model,
 		"messages":    messages,
 		"temperature": temperature,
 		"max_tokens":  c.MaxTokens,
+	}
+	if len(stop) > 0 {
+		body["stop"] = stop
 	}
 	if c.Tools != nil {
 		body["tools"] = c.Tools

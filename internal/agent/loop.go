@@ -130,9 +130,19 @@ func RunAgent(taskPrompt string, tools map[string]Tool, fn LLMFn, opts Options) 
 		}
 
 		// TEXT ReAct turn.
-		messages = append(messages, llm.Message{Role: "assistant", Content: reply.Content})
+		// The history keeps only the real directive, never the model's invented
+		// OUTPUT block (identical to what a stop-sequence-honouring provider returns).
+		// The transcript keeps the raw reply so -parse re-execution stays faithful.
+		content, cut := CutHallucinatedOutput(reply.Content)
+		if strings.TrimSpace(content) == "" {
+			content = reply.Content // a reply that is ONLY fake output: keep it, nudge below
+		}
+		messages = append(messages, llm.Message{Role: "assistant", Content: content})
 		action := ParseAction(reply.Content)
 		rec := map[string]any{"step": step, "assistant": reply.Content, "action": action.Kind}
+		if cut {
+			rec["cut_hallucinated_output"] = true
+		}
 
 		switch action.Kind {
 		case "final":

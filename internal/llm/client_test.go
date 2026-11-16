@@ -241,3 +241,68 @@ func TestCallChainsTempThenSystemRole(t *testing.T) {
 		t.Errorf("final request wrong: temp=%v hadSystem=%v", lastTemp, lastHadSystem)
 	}
 }
+
+func TestCallSendsStopSequences(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Stop []string `json:"stop"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		got = body.Stop
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv.URL+"/v1")
+	c.Stop = []string{"\nOUTPUT:", "\nObservation:"}
+	if _, err := c.Call([]Message{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "\nOUTPUT:" || got[1] != "\nObservation:" {
+		t.Fatalf("stop not sent: %q", got)
+	}
+}
+
+func TestCallOmitsStopWhenUnset(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&raw)
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+	if _, err := newTestClient(t, srv.URL+"/v1").Call([]Message{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["stop"]; ok {
+		t.Fatalf("stop must be omitted when unset: %v", raw)
+	}
+}
+
+func TestCallDropsStopWhenRejected(t *testing.T) {
+	// Reasoning models reject the parameter; femto resends once without it rather than
+	// excluding the model.
+	var n int32
+	var retryHadStop bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := atomic.AddInt32(&n, 1)
+		var raw map[string]any
+		json.NewDecoder(r.Body).Decode(&raw)
+		if i == 1 {
+			http.Error(w, `{"error":{"message":"Unsupported parameter: 'stop' is not supported with this model."}}`,
+				http.StatusBadRequest)
+			return
+		}
+		_, retryHadStop = raw["stop"]
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv.URL+"/v1")
+	c.Stop = []string{"\nOUTPUT:"}
+	rep, err := c.Call([]Message{{Role: "user", Content: "hi"}})
+	if err != nil || rep.Content != "ok" || atomic.LoadInt32(&n) != 2 || retryHadStop {
+		t.Fatalf("want one stop-less retry, err=%v rep=%q n=%d retryHadStop=%v", err, rep.Content, n, retryHadStop)
+	}
+	if c.Stop == nil {
+		t.Error("the fix-up must not mutate the client's configured Stop")
+	}
+}

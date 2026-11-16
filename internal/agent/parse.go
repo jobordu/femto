@@ -46,7 +46,29 @@ var (
 	// ONLY when it's immediately before a newline (decoration), so a same-line glob
 	// input like "*.txt" is never eaten.
 	leadMDRE = regexp.MustCompile(`(?s)^[ \t]*\*+[ \t]*\n`)
+	// observationRE is a line where the model starts writing the tool's result ITSELF
+	// ("OUTPUT:", "Observation:", "**Output:**", any case). Everything from there on is
+	// hallucinated: the real observation only comes from the harness on the next turn.
+	observationRE = regexp.MustCompile(`(?im)^[ \t]*[>*#\-]*[ \t]*(?:OUTPUT|OBSERVATION)\**[ \t]*:`)
 )
+
+// TextStopSequences are sent as the API "stop" list in TEXT mode so the model halts
+// before inventing its own tool result. Four entries, the OpenAI maximum; the parser
+// cut (CutHallucinatedOutput) backstops every other spelling and providers that
+// ignore or reject "stop".
+var TextStopSequences = []string{"\nOUTPUT:", "\nObservation:", "\nOutput:", "\nOBSERVATION:"}
+
+// CutHallucinatedOutput truncates a TEXT-mode reply at the first line that opens a
+// model-written "OUTPUT:"/"Observation:" block — the same text a provider honouring
+// TextStopSequences would have returned. Without it the fake output became part of the
+// command (bash ran "OUTPUT: ..." → "OUTPUT:: command not found") and a FINAL guessed
+// from that fake output could win. Reports whether anything was cut.
+func CutHallucinatedOutput(text string) (string, bool) {
+	if m := observationRE.FindStringIndex(text); m != nil {
+		return text[:m[0]], true
+	}
+	return text, false
+}
 
 // Protocol keywords are never tool names — so "ACTION:/INPUT:" (a model mashing the
 // two markers with no tool between) doesn't parse tool="INPUT".
@@ -200,7 +222,8 @@ func findToolCall(t string) ([]int, string) {
 }
 
 func ParseAction(text string) Action {
-	t := text
+	// Only what the model wrote BEFORE inventing its own tool output is a directive.
+	t, _ := CutHallucinatedOutput(text)
 	// FINAL can arrive line-anchored ("FINAL: x") OR through the action frame
 	// ("ACTION: FINAL\nINPUT: x" — some models finalize this way). Take the earliest.
 	finalPos, finalAns, hasFinal := -1, "", false

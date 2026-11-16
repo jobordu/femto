@@ -297,3 +297,29 @@ func TestRunParseMode(t *testing.T) {
 		t.Fatalf("parse none: %q", out.String())
 	}
 }
+
+// TestRunStopSequencesTextModeOnly: text mode asks the provider to halt before a
+// model-written OUTPUT block; native mode has no such block and sends none.
+func TestRunStopSequencesTextModeOnly(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		var raw map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewDecoder(r.Body).Decode(&raw)
+			w.Write([]byte(`{"choices":[{"message":{"content":"FINAL: flag{ok}"}}]}`))
+		}))
+		args := []string{"-prompt", "solve", "-base-url", srv.URL + "/v1", "-executor", "local"}
+		if native {
+			args = append(args, "-native")
+		}
+		var out, errb bytes.Buffer
+		run(args, env(map[string]string{"FEMTO_API_KEY": "k"}), &out, &errb)
+		srv.Close()
+		stop, has := raw["stop"].([]any)
+		if native && has {
+			t.Errorf("native mode must not send stop, got %v", raw["stop"])
+		}
+		if !native && (len(stop) != len(agent.TextStopSequences) || stop[0] != agent.TextStopSequences[0]) {
+			t.Errorf("text mode must send TextStopSequences, got %v", raw["stop"])
+		}
+	}
+}

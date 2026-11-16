@@ -123,6 +123,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 1
 	}
 
+	if !*native { // halt the model before it writes its own fake OUTPUT block
+		client.Stop = agent.TextStopSequences
+	}
+
 	res := agent.RunAgent(*prompt, tools, client.Call, agent.Options{
 		MaxSteps: *maxSteps, LLMRetries: 2, Native: *native,
 	})
