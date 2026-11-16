@@ -110,7 +110,7 @@ func TestRunDockerExecutorSeam(t *testing.T) {
 
 	var gotImage string
 	cleaned := false
-	newDockerExecutor = func(image, mount, mem string) (agent.Executor, func(), error) {
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
 		gotImage = image
 		return fakeExec{}, func() { cleaned = true }, nil
 	}
@@ -123,10 +123,33 @@ func TestRunDockerExecutorSeam(t *testing.T) {
 	}
 }
 
+func TestRunDockerNetworkFlag(t *testing.T) {
+	srv := finalServer(t)
+	defer srv.Close()
+	orig := newDockerExecutor
+	defer func() { newDockerExecutor = orig }()
+	var gotNet string
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
+		gotNet = network
+		return fakeExec{}, func() {}, nil
+	}
+	var out, errb bytes.Buffer
+	base := []string{"-prompt", "x", "-base-url", srv.URL + "/v1", "-executor", "docker"}
+	e := env(map[string]string{"FEMTO_API_KEY": "k"})
+	run(base, e, &out, &errb) // default: offline
+	if gotNet != "none" {
+		t.Fatalf("default network: want none, got %q", gotNet)
+	}
+	run(append(base, "-network", "cy-svc-net"), e, &out, &errb) // service challenge
+	if gotNet != "cy-svc-net" {
+		t.Fatalf("network flag not propagated: want cy-svc-net, got %q", gotNet)
+	}
+}
+
 func TestRunDockerExecutorError(t *testing.T) {
 	orig := newDockerExecutor
 	defer func() { newDockerExecutor = orig }()
-	newDockerExecutor = func(image, mount, mem string) (agent.Executor, func(), error) {
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
 		return nil, nil, errors.New("no daemon")
 	}
 	var out, errb bytes.Buffer
@@ -157,7 +180,7 @@ func TestRunDockerImageOverride(t *testing.T) {
 	orig := newDockerExecutor
 	defer func() { newDockerExecutor = orig }()
 	var gotImage string
-	newDockerExecutor = func(image, mount, mem string) (agent.Executor, func(), error) {
+	newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
 		gotImage = image
 		return fakeExec{}, func() {}, nil
 	}
@@ -254,5 +277,49 @@ func TestFirstEnv(t *testing.T) {
 	}
 	if got := firstEnv(g, "X"); got != "" {
 		t.Fatalf("firstEnv empty failed: %q", got)
+	}
+}
+
+func TestRunParseMode(t *testing.T) {
+	// -parse re-executes the ReAct parser deterministically (no LLM/key) — the
+	// verification primitive the neutrality judge uses to confirm/refute HARNESS claims.
+	var out, errb bytes.Buffer
+	code := run([]string{"-parse", "-prompt", "Let's try. ACTION: shell INPUT: ls"},
+		env(nil), &out, &errb)
+	if code != 0 || !strings.Contains(out.String(), `"Kind":"tool"`) ||
+		!strings.Contains(out.String(), `"Tool":"shell"`) {
+		t.Fatalf("parse tool: code=%d out=%q", code, out.String())
+	}
+	out.Reset()
+	// prose with no directive -> "none": a HARNESS claim on this text would be refuted.
+	run([]string{"-parse", "-prompt", "I think the flag is here."}, env(nil), &out, &errb)
+	if !strings.Contains(out.String(), `"Kind":"none"`) {
+		t.Fatalf("parse none: %q", out.String())
+	}
+}
+
+// TestRunStopSequencesTextModeOnly: text mode asks the provider to halt before a
+// model-written OUTPUT block; native mode has no such block and sends none.
+func TestRunStopSequencesTextModeOnly(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		var raw map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewDecoder(r.Body).Decode(&raw)
+			w.Write([]byte(`{"choices":[{"message":{"content":"FINAL: flag{ok}"}}]}`))
+		}))
+		args := []string{"-prompt", "solve", "-base-url", srv.URL + "/v1", "-executor", "local"}
+		if native {
+			args = append(args, "-native")
+		}
+		var out, errb bytes.Buffer
+		run(args, env(map[string]string{"FEMTO_API_KEY": "k"}), &out, &errb)
+		srv.Close()
+		stop, has := raw["stop"].([]any)
+		if native && has {
+			t.Errorf("native mode must not send stop, got %v", raw["stop"])
+		}
+		if !native && (len(stop) != len(agent.TextStopSequences) || stop[0] != agent.TextStopSequences[0]) {
+			t.Errorf("text mode must send TextStopSequences, got %v", raw["stop"])
+		}
 	}
 }

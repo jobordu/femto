@@ -2,8 +2,11 @@
 # crypto/number-theory libs. ~180MB. sympy (RSA/discrete-log math, heavy) is opt-in:
 # `--build-arg WITH_SYMPY=1`.
 FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# unzip/bsdextrautils(hexdump)/tshark/tcpdump: challenge files often ship zipped or
+# as a pcap, and models reach for hexdump first.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
         binutils xxd file openssl ca-certificates \
+        unzip bsdextrautils tshark tcpdump \
     && rm -rf /var/lib/apt/lists/*
 ARG WITH_SYMPY=0
 RUN pip install --no-cache-dir pycryptodome requests gmpy2 \

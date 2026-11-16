@@ -50,8 +50,11 @@ type Client struct {
 	Temperature float64
 	MaxTokens   int
 	Tools       []any // function-calling schemas; non-nil => native mode
-	http        *http.Client
-	maxRetries  int
+	// Stop is sent as the API "stop" list (text mode). If the provider rejects the
+	// parameter, Call drops it once and retries, like the temperature/system fix-ups.
+	Stop       []string
+	http       *http.Client
+	maxRetries int
 }
 
 // retryStatus: 429 = rate limit, 502/503/504 = transient gateway/overload. 500 is
@@ -83,13 +86,60 @@ func New(baseURL, apiKey, model string, temperature float64, maxTokens int,
 	}, nil
 }
 
-// Call sends the conversation and returns the assistant Reply.
+// minPositiveTemp is the fallback temperature for models that reject 0 ("must be
+// > 0"). Near-deterministic, but keeps the model in the run rather than excluding
+// it on the most common benchmark setting.
+const minPositiveTemp = 1e-6
+
+// Call sends the conversation and returns the assistant Reply, transparently
+// working around provider format quirks so a *harness* assumption never
+// masquerades as a model failure. Each fix-up applies at most once:
+//   - temperature 0 rejected ("must be > 0")  -> retry with minPositiveTemp
+//   - system role rejected (500)              -> fold system into the user turn
+//   - "stop" parameter rejected (400/422)     -> resend without stop sequences
+//
+// A model that needs BOTH (e.g. gemma at temp 0) chains through both.
 func (c *Client) Call(messages []Message) (Reply, error) {
+	temp := c.Temperature
+	msgs := messages
+	stop := c.Stop
+	tempFixed, sysFixed, stopFixed := false, false, false
+	for {
+		reply, status, body, err := c.send(msgs, temp, stop)
+		if err == nil {
+			return reply, nil
+		}
+		low := strings.ToLower(body)
+		if !tempFixed && (status == 400 || status == 422) &&
+			strings.Contains(low, "temperature") && temp <= 0 {
+			temp, tempFixed = minPositiveTemp, true
+			continue
+		}
+		if !stopFixed && len(stop) > 0 && (status == 400 || status == 422) &&
+			strings.Contains(low, "stop") {
+			stop, stopFixed = nil, true // e.g. reasoning models: "Unsupported parameter: 'stop'"
+			continue
+		}
+		if !sysFixed && status == http.StatusInternalServerError &&
+			strings.Contains(low, "system role") && hasSystemRole(msgs) {
+			msgs, sysFixed = foldSystemRole(msgs), true
+			continue
+		}
+		return reply, err
+	}
+}
+
+// send does one POST + parse at the given temperature, returning the HTTP status
+// and raw body so Call can react to provider-specific rejections.
+func (c *Client) send(messages []Message, temperature float64, stop []string) (Reply, int, string, error) {
 	body := map[string]any{
 		"model":       c.Model,
 		"messages":    messages,
-		"temperature": c.Temperature,
+		"temperature": temperature,
 		"max_tokens":  c.MaxTokens,
+	}
+	if len(stop) > 0 {
+		body["stop"] = stop
 	}
 	if c.Tools != nil {
 		body["tools"] = c.Tools
@@ -99,15 +149,54 @@ func (c *Client) Call(messages []Message) (Reply, error) {
 
 	resp, err := c.postRetry(c.BaseURL+"/chat/completions", raw)
 	if err != nil {
-		return Reply{}, err
+		return Reply{}, 0, "", err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return Reply{}, errors.New("llm http " + strconv.Itoa(resp.StatusCode) + ": " +
-			truncate(string(data), 200))
+		return Reply{}, resp.StatusCode, string(data), errors.New("llm http " +
+			strconv.Itoa(resp.StatusCode) + ": " + truncate(string(data), 200))
 	}
-	return parseReply(data)
+	reply, err := parseReply(data)
+	return reply, resp.StatusCode, string(data), err
+}
+
+// hasSystemRole reports whether any message uses the system role.
+func hasSystemRole(messages []Message) bool {
+	for _, m := range messages {
+		if m.Role == "system" {
+			return true
+		}
+	}
+	return false
+}
+
+// foldSystemRole rewrites messages so no system role remains: system content is
+// prepended to the first user message (or promoted to a user turn if none), order
+// otherwise preserved. Keeps femto neutral for providers that reject system role.
+func foldSystemRole(messages []Message) []Message {
+	var sys []string
+	rest := make([]Message, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == "system" {
+			if m.Content != "" {
+				sys = append(sys, m.Content)
+			}
+			continue
+		}
+		rest = append(rest, m)
+	}
+	if len(sys) == 0 {
+		return rest
+	}
+	prefix := strings.Join(sys, "\n\n")
+	for i, m := range rest {
+		if m.Role == "user" {
+			rest[i].Content = prefix + "\n\n" + m.Content
+			return rest
+		}
+	}
+	return append([]Message{{Role: "user", Content: prefix}}, rest...)
 }
 
 // postRetry POSTs with exponential backoff on rate-limit/transient/timeout errors.

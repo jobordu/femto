@@ -32,9 +32,12 @@ var nowUnix = func() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 
 // newDockerExecutor is a seam: a per-task Docker sandbox in prod, overridden in tests
 // so run() is exercised without a real daemon. Returns the executor + a cleanup func.
-var newDockerExecutor = func(image, mount, mem string) (agent.Executor, func(), error) {
+var newDockerExecutor = func(image, mount, mem, network string) (agent.Executor, func(), error) {
 	box := sandbox.NewDockerSandbox(image, mount)
 	box.Memory = mem
+	if network != "" {
+		box.Network = network // join a compose network for service (networked) challenges
+	}
 	if err := box.Start(); err != nil {
 		return nil, nil, err
 	}
@@ -54,6 +57,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		category  = fs.String("category", "", "challenge category → picks the specialized sandbox image (docker only)")
 		image     = fs.String("image", "", "override sandbox image (docker only)")
 		mount     = fs.String("mount", "", "host dir bind-mounted at /task (docker only)")
+		network   = fs.String("network", "none", "docker sandbox network: 'none' (default, offline) or a compose network name for service/networked challenges (docker only)")
 		sandMem   = fs.String("sandbox-mem", "256m", "container RAM cap (docker only)")
 		native    = fs.Bool("native", false, "native function-calling mode")
 		maxSteps  = fs.Int("max-steps", 15, "max ReAct steps")
@@ -67,6 +71,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		taskID    = fs.String("task-id", "", "task id stamped on the trace record")
 		benchmark = fs.String("benchmark", "", "benchmark name stamped on the trace record")
 		showVer   = fs.Bool("version", false, "print version and exit")
+		parseOnly = fs.Bool("parse", false, "parse -prompt through the ReAct parser and print the Action as JSON, then exit — deterministic verification for the harness-neutrality judge")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -78,6 +83,11 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if *prompt == "" {
 		fmt.Fprintln(stderr, "femto: -prompt is required")
 		return 2
+	}
+	if *parseOnly { // deterministic parser re-execution — no LLM, no key needed.
+		b, _ := json.Marshal(agent.ParseAction(*prompt))
+		fmt.Fprintln(stdout, string(b))
+		return 0
 	}
 	key := firstEnv(getenv, "FEMTO_API_KEY", "OPENAI_API_KEY")
 	if key == "" {
@@ -91,7 +101,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		if img == "" {
 			img = sandbox.ImageForCategory(*category, nil, "")
 		}
-		box, cleanup, err := newDockerExecutor(img, *mount, *sandMem)
+		box, cleanup, err := newDockerExecutor(img, *mount, *sandMem, *network)
 		if err != nil {
 			fmt.Fprintln(stderr, "femto:", err)
 			return 1
@@ -111,6 +121,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if err != nil {
 		fmt.Fprintln(stderr, "femto:", err)
 		return 1
+	}
+
+	if !*native { // halt the model before it writes its own fake OUTPUT block
+		client.Stop = agent.TextStopSequences
 	}
 
 	res := agent.RunAgent(*prompt, tools, client.Call, agent.Options{
