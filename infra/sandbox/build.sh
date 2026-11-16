@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build femto's specialized sandbox tiers. Each is category-routed by the agent
-# (internal/sandbox/exec.go:ImageForCategory): lite for web/misc/shell (no Python,
-# tiny), crypto for crypto/ppc, pwn for pwn/reverse/forensics, full for untagged/
+# (internal/sandbox/exec.go:ImageForCategory): lite for web/misc/shell (small,
+# distro python3), crypto for crypto/ppc, pwn for pwn/reverse/forensics, full for untagged/
 # multi-category (safe fallback).
 #
 #   ./build.sh              # all tiers, host-native arch

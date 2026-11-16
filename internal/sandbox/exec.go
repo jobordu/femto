@@ -23,8 +23,8 @@ func randID() string {
 
 // ── category → specialized image routing ─────────────────────────────────────
 //
-// The win is varying the BASE, not just trimming tools: web/misc/shell need no
-// Python (tiny alpine image), crypto needs python+crypto libs, pwn/rev/forensics
+// The win is varying the BASE, not just trimming tools: web/misc/shell get a small
+// alpine image (with the distro python3 the agent's python tool needs), crypto needs python+crypto libs, pwn/rev/forensics
 // need the heavy binary toolchain. Unknown/blank categories fall back to the FULL
 // image (network-off means a missing tool can't be installed — safety first).
 

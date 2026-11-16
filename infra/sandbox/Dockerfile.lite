@@ -1,7 +1,9 @@
-# femto-sbx-lite — the tiny tier for web / misc / shell challenges that need NO
-# Python: just shell + light binary/network tools on alpine. ~30-60MB (vs ~350MB for
-# the python-based full image). The agent's tool-calls run here network-OFF, so every
-# tool is baked in (can't apt/apk-install at runtime).
+# femto-sbx-lite — the small tier for web / misc / shell challenges: shell + light
+# binary/network tools on alpine, plus the distro's python3 because femto ALWAYS
+# offers the agent a `python` tool (and the prompt tells models to use it); without
+# it every python call here failed with "python3: not found".
+# ~75-90MB (vs ~350MB for the full image). The agent's tool-calls run here
+# network-OFF, so every tool is baked in (can't apt/apk-install at runtime).
 FROM alpine:3.20
 RUN apk add --no-cache \
         bash \
@@ -14,6 +16,7 @@ RUN apk add --no-cache \
         grep gawk sed \
         jq \
         openssl \
-        tar gzip xz unzip
+        tar gzip xz unzip \
+        python3
 WORKDIR /task
 CMD ["sleep", "3600"]
